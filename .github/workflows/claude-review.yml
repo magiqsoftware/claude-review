@@ -158,7 +158,7 @@ jobs:
 
       - name: Checkout
         if: success() && steps.cap.outputs.capped != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Full commit graph is needed so the three-dot `git diff base...HEAD`
           # merge-base resolves. blob:none makes it a partial (blobless) clone:
