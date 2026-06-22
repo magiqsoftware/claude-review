@@ -1,0 +1,3 @@
+# This repo is a supply-chain trust root: its workflow runs inside every
+# consuming repo with that repo's secrets. All changes require code-owner review.
+* @plimmerd
