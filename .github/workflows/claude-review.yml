@@ -26,10 +26,17 @@ name: Claude PR Review (reusable)
 
 on:
   workflow_call:
-    # No inputs required: model/scope/force come from the comment body, the
-    # allowlist from the CLAUDE_REVIEW_USERS variable, and credentials via
-    # `secrets: inherit`. Add inputs here later only if a repo needs to vary
-    # the defaults.
+    inputs:
+      review_command:
+        description: >-
+          Slash command the CI step invokes. Defaults to the org toolkit
+          review. A consuming repo may point this at its own
+          .claude/commands/<name>.md to run a repo-tuned review instead.
+        type: string
+        required: false
+        default: "/pr-review-toolkit:review-pr"
+    # model/scope/force still come from the comment body; allowlist from the
+    # CLAUDE_REVIEW_USERS variable; credentials via `secrets: inherit`.
 
 permissions:
   pull-requests: write
@@ -224,7 +231,7 @@ jobs:
           REVIEW_SCOPE: ${{ steps.args.outputs.scope }}
         run: |
           set -o pipefail
-          PROMPT="/pr-review-toolkit:review-pr ${REVIEW_SCOPE}
+          PROMPT="${{ inputs.review_command }} ${REVIEW_SCOPE}
 
           You are reviewing PR #${PR_NUMBER} in CI. There are no unstaged changes;
           the PR's changes are the diff between 'origin/${BASE_REF}' and HEAD. Use
