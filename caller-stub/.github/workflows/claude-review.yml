@@ -1,0 +1,53 @@
+# Claude PR Review — caller stub (copy this into a consuming repo).
+#
+# The review logic lives in the org-wide reusable workflow at
+# magiqsoftware/claude-review. This thin file owns the issue_comment trigger and
+# delegates everything else. To adopt Claude review in another repo, copy this
+# file into <repo>/.github/workflows/ and ensure ANTHROPIC_API_KEY (secret) and
+# CLAUDE_REVIEW_USERS (variable) are visible to the repo (org-level or repo-level).
+#
+# Usage (comment on a PR): "@claude" plus optional keywords —
+#   opus | sonnet | haiku   choose the model (default: sonnet)
+#   full                    full review (all agents); default: code errors
+#   force                   bypass the per-PR review cap
+#
+# Updating: to pick up upstream changes, bump the @vX.Y.Z pin below to a newer
+# claude-review release tag in a reviewed PR (never a moving alias like @v1).
+# See the claude-review README for the release/versioning process.
+name: Claude PR Review
+
+on:
+  issue_comment:
+    types: [created]
+
+# The effective GITHUB_TOKEN permissions are the intersection of these and the
+# reusable workflow's. Declare them here so the token is write-capable.
+permissions:
+  pull-requests: write
+  contents: read
+  issues: write
+
+jobs:
+  review:
+    # Cheap caller-side gate: only PR comments that mention @claude reach the
+    # reusable workflow. Without this, every issue_comment.created would dispatch
+    # the called workflow just to skip internally (run noise on every comment).
+    # The full security gate (allowlist, author association, fork guard) is still
+    # enforced centrally in the reusable workflow — not duplicated here.
+    # Bot commenters are excluded here too: reviewer bots (e.g. Qodo) quote PR
+    # text and can echo "@claude", which would otherwise dispatch a run that the
+    # central allowlist then skips — harmless but noisy in the Actions tab.
+    if: >-
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude') &&
+      !endsWith(github.event.comment.user.login, '[bot]')
+    # Pinned to an immutable release tag, not the moving @v1 major alias: this job
+    # runs with this repo's secrets, so a change to the central workflow must be
+    # adopted via a reviewed version bump here rather than taking effect silently.
+    # Bump to a newer tag deliberately to pick up upstream changes.
+    uses: magiqsoftware/claude-review/.github/workflows/claude-review.yml@v1.1.0
+    # A repo can run its own review command instead of the default toolkit review
+    # by uncommenting the block below and pointing it at a .claude/commands/<x>.md:
+    #   with:
+    #     review_command: "/my-review"
+    secrets: inherit
