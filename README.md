@@ -38,6 +38,77 @@ allowlist inherit from the org.
 | `@claude opus full` | Combine (keywords are order-independent) |
 | `@claude force` | Run despite the per-PR review cap |
 
+### What `full` changes (and what it doesn't)
+
+`full` only widens **review scope**; it does not change the model, the cost cap,
+the allowlist, or anything else. The keyword maps to a single workflow variable
+(`scope`):
+
+- **Default (no `full`)** → `scope = "code errors"`. The review command runs a
+  focused pass: code quality and error handling only. This is the cheapest useful
+  default — fewest agents, lowest token spend.
+- **`full`** → `scope = "all"`. The review command runs every agent in the
+  toolkit: comments, tests, errors, types, code, and simplify. More thorough,
+  but more agents = more tokens = more cost.
+
+The keyword is passed through to the review command as a trailing argument
+(`/pr-review-toolkit:review-pr code errors` vs `… all`); the command decides
+which agents that scope dispatches. `full` is therefore independent of `opus` /
+`sonnet` / `haiku` (model) and of `force` (cost-cap bypass) — combine them
+freely. Note that some repo-specific review commands ignore scope entirely and
+always run their full agent set (see *Repo-specific review commands* below).
+
+## Repo-specific review commands (overriding the reviewer)
+
+By default the reusable workflow runs the org toolkit review
+(`/pr-review-toolkit:review-pr`). A consuming repo can **override** that with its
+own review command via the `review_command` input — pointed at a
+`.claude/commands/<name>.md` that lives in the consuming repo. The workflow checks
+out the PR head, so that command and any agents it dispatches are read from the
+repo being reviewed. This lets a repo replace the generic reviewer with one tuned
+to its language and risks.
+
+Wire it up in the caller stub:
+
+```yaml
+uses: magiqsoftware/claude-review/.github/workflows/claude-review.yml@v1.1.0
+with:
+  review_command: "/cobol-review"   # a command defined in this repo's .claude/commands/
+secrets: inherit
+```
+
+### Example: `enterprise-cobol`
+
+The `enterprise-cobol` repo ships its own COBOL-tuned reviewer under
+`.claude/` and points `review_command` at it, so `@claude` on a COBOL PR runs the
+COBOL reviewer instead of the generic toolkit:
+
+- **`.claude/commands/cobol-review.md`** — the orchestrator command. It reads
+  `CLAUDE.md` for repo layout, resolves the changed files
+  (`git diff --name-only origin/<base>...HEAD`), ignores generated `*.GEN`
+  files, then dispatches two agents **in parallel** and aggregates their
+  sections into one `## 🟦 COBOL review` markdown comment.
+- **`.claude/agents/cobol-correctness.md`** — reviews control flow / logic only:
+  PERFORM/GO TO ranges, fall-through, unterminated scopes, condition and
+  EVALUATE handling, unchecked FILE STATUS / return codes / SQLCODE, abend paths.
+- **`.claude/agents/cobol-data-integrity.md`** — reviews data handling only:
+  PIC/USAGE/COMP-3/sign/precision, MOVE truncation, REDEFINES overlaps,
+  OCCURS/subscript bounds, and the blast radius of a changed copybook on every
+  program that `COPY`s it.
+
+Both agents are read-only (`tools: Read, Grep, Glob, Bash`) and enforce strict
+**diff-scoped context discipline** — work from the diff, follow only the
+copybooks a changed program `COPY`s, `grep` for a changed copybook's includers,
+never walk the whole tree, never read `*.GEN`. That keeps token cost bounded on a
+large mainframe codebase.
+
+How the override differs from the default `full` behavior: `cobol-review`
+**ignores the scope keyword entirely** — it always runs both COBOL agents,
+whether the comment was `@claude` or `@claude full`. The model keyword (`opus` /
+`sonnet` / `haiku`), the cost cap, the allowlist, and the fork guard still apply
+exactly as for the default reviewer; only the *what-gets-reviewed* step is
+swapped out.
+
 ## Limits (and why)
 
 - **3 reviews per PR** — reviews cost API tokens; the cap stops runaway spend.
