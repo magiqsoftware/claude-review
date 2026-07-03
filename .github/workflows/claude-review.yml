@@ -34,8 +34,12 @@ on:
   workflow_call:
     inputs:
       pr_number:
+        # String, not number: workflow_dispatch delivers number inputs as
+        # strings, and passing one into a workflow_call `type: number` input
+        # fails startup validation. pr_number is only ever used in string
+        # contexts here (gh args, concurrency group), so string is correct.
         description: "PR number to review."
-        type: number
+        type: string
         required: true
       model:
         description: "Model: sonnet | opus | haiku."
