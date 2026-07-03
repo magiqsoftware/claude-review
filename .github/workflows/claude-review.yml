@@ -147,10 +147,20 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           ACTOR: ${{ github.actor }}
         run: |
+          # gh prints the created comment URL ending in #issuecomment-<id>; the
+          # trailing -<id> is the comment id we PATCH later. Validate it parsed to
+          # digits so a future gh output change fails loudly here instead of
+          # silently 404-ing every later PATCH while the job still reports success.
           URL=$(gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
             --body "🔍 Claude review started (triggered by @${ACTOR})…")
-          echo "id=${URL##*-}" >> "$GITHUB_OUTPUT"
-          echo "Started comment id: ${URL##*-}"
+          ID="${URL##*-}"
+          case "$ID" in
+            ''|*[!0-9]*)
+              echo "Could not parse comment id from gh output: '$URL'" >&2
+              exit 1 ;;
+          esac
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Started comment id: $ID"
 
       - name: Checkout
         if: success() && steps.cap.outputs.capped != 'true'
