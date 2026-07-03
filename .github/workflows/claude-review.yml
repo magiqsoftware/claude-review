@@ -1,32 +1,57 @@
 # Claude PR Review — REUSABLE workflow (org-wide).
 #
 # This is the single source of truth. Consuming repos call it from a tiny
-# caller stub (see the README) that owns the `issue_comment` trigger:
+# caller stub (see the README) that owns the `workflow_dispatch` trigger:
 #
 #   jobs:
 #     review:
 #       uses: magiqsoftware/claude-review/.github/workflows/claude-review.yml@v1
 #       secrets: inherit
+#       with:
+#         pr_number: ${{ inputs.pr_number }}
+#         model: ${{ inputs.model }}
+#         scope: ${{ inputs.scope }}
+#         force: ${{ inputs.force }}
 #
-# A called workflow runs in the CALLER'S event context, so every
-# `github.event.comment.*` reference below resolves to the comment on the
-# consuming repo's PR. `secrets: inherit` passes ANTHROPIC_API_KEY (set as an
-# organisation secret) and the write-capable GITHUB_TOKEN straight through.
+# A called workflow runs in the CALLER'S event context. `secrets: inherit`
+# passes ANTHROPIC_API_KEY (set as an organisation secret) and the
+# write-capable GITHUB_TOKEN straight through.
 #
-# Trigger grammar (in the caller's PR comment): "@claude" plus optional keywords
-#   opus | sonnet | haiku   choose the model (default: sonnet)
-#   full                    full review (all agents); default: code errors
-#   force                   bypass the per-PR review cap
+# Inputs (typed `workflow_dispatch` inputs on the caller, passed straight
+# through here):
+#   pr_number   PR number to review (required)
+#   model       opus | sonnet | haiku (default: sonnet)
+#   scope       "code errors" or "all" (default: "code errors")
+#   force       bypass the per-PR review cap (default: false)
 # Allowlist: organisation (or repo) variable CLAUDE_REVIEW_USERS = JSON array of
 #            GitHub logins, e.g. ["plimmerd","alice"].
 # Cost cap:  after 3 successful reviews on a PR the workflow declines further
-#            runs unless the comment contains "force".
+#            runs unless force is set.
 # See Azure DevOps work item AB#33808 for the design and rationale.
 name: Claude PR Review (reusable)
 
 on:
   workflow_call:
     inputs:
+      pr_number:
+        description: "PR number to review."
+        type: number
+        required: true
+      model:
+        description: "Model: sonnet | opus | haiku."
+        type: string
+        required: false
+        default: sonnet
+      scope:
+        description: 'Review scope passed to the review command: "code errors" or "all".'
+        type: string
+        required: false
+        default: "code errors"
+      force:
+        description: "Bypass the per-PR review cap."
+        type: boolean
+        required: false
+        default: false
       review_command:
         description: >-
           Slash command the CI step invokes. Defaults to the org toolkit
@@ -35,35 +60,24 @@ on:
         type: string
         required: false
         default: "/pr-review-toolkit:review-pr"
-    # model/scope/force still come from the comment body; allowlist from the
-    # CLAUDE_REVIEW_USERS variable; credentials via `secrets: inherit`.
 
 permissions:
   pull-requests: write
   contents: read
-  # Reactions and PR conversation comments are issue-scoped endpoints
-  # (/issues/comments/.../reactions, gh pr comment).
+  # PR conversation comments and comment edits are issue-scoped endpoints
+  # (gh pr comment, /issues/comments/... PATCH).
   issues: write
 
 concurrency:
-  group: claude-review-${{ github.event.issue.number }}
+  group: claude-review-${{ inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
   review:
-    # Run only on PR comments that mention @claude, from an allowlisted user who
-    # also has write access to the repo. These are the security-relevant gates:
-    # a comment that fails them is silently ignored (no bot reply on every
-    # unrelated issue comment). Reasons a run *starts* but then declines (e.g. the
-    # cost cap) are explained in a posted comment further down.
-    #
-    # @claude is the sole trigger. "/review" was dropped because it collided with
-    # another reviewer bot (Qodo) and spawned duplicate workflow runs.
-    if: >-
-      github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@claude') &&
-      contains(fromJSON(vars.CLAUDE_REVIEW_USERS || '[]'), github.event.comment.user.login) &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    # Gate on the curated allowlist. workflow_dispatch is already restricted to
+    # users with repo write access, so author_association is guaranteed and no
+    # longer checked; CLAUDE_REVIEW_USERS is the finer, curated gate on the actor.
+    if: contains(fromJSON(vars.CLAUDE_REVIEW_USERS || '[]'), github.actor)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -76,17 +90,8 @@ jobs:
       # a PR's runs.
       REVIEW_MARKER: "<!-- claude-review:complete -->"
     steps:
-      - name: Acknowledge trigger (eyes reaction)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
-            -f content='eyes'
-
       # Secrets (ANTHROPIC_API_KEY, write-capable GITHUB_TOKEN) are present on
-      # issue_comment runs. Refuse fork PRs *before* checking out their head so
+      # this run. Refuse fork PRs *before* checking out their head so
       # untrusted PR content can never reach the bypassPermissions agent. A
       # same-repo PR branch can only be pushed by a write-access contributor, so
       # the head is trusted once cross-repo PRs are excluded.
@@ -94,58 +99,29 @@ jobs:
         id: forkguard
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           CROSS=$(gh pr view "$PR_NUMBER" \
             --repo "${{ github.repository }}" \
             --json isCrossRepository -q .isCrossRepository)
           if [ "$CROSS" = "true" ]; then
-            gh pr comment "$PR_NUMBER" \
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
               --body "🚫 Claude review is disabled for cross-repository (fork) PRs for security reasons (the workflow runs with repository secrets). Re-run from a branch in this repository."
             echo "Refusing to review a cross-repository (fork) PR with secrets present." >&2
             exit 1
           fi
 
-      # Parse the trigger comment into review options. The body is passed via env
-      # (never interpolated into the script) to avoid shell injection. Matching is
-      # word-bounded (-w) and case-insensitive (-i) so "force" can't match inside
-      # another word and "Opus" works the same as "opus".
-      - name: Parse review options
-        id: args
-        env:
-          COMMENT_BODY: ${{ github.event.comment.body }}
-        run: |
-          MODEL=$(printf '%s' "$COMMENT_BODY" | grep -iowE 'opus|sonnet|haiku' | head -n1 | tr '[:upper:]' '[:lower:]')
-          MODEL=${MODEL:-sonnet}
-
-          if printf '%s' "$COMMENT_BODY" | grep -iqwE 'full'; then
-            SCOPE="all"
-          else
-            SCOPE="code errors"
-          fi
-
-          if printf '%s' "$COMMENT_BODY" | grep -iqwE 'force'; then
-            FORCE=true
-          else
-            FORCE=false
-          fi
-
-          echo "model=$MODEL"   >> "$GITHUB_OUTPUT"
-          echo "scope=$SCOPE"   >> "$GITHUB_OUTPUT"
-          echo "force=$FORCE"   >> "$GITHUB_OUTPUT"
-          echo "Parsed options: model=$MODEL scope='$SCOPE' force=$FORCE"
-
-      # Cost cap: decline a run once a PR already has 3 completed reviews, unless the
-      # comment said "force". Count is the number of prior review comments carrying
-      # REVIEW_MARKER. When capped we post an explanatory comment (so the reviewer
-      # isn't left with a bare "skipped") and set capped=true; later steps are gated
-      # on it and the job still ends green.
+      # Cost cap: decline a run once a PR already has 3 completed reviews, unless
+      # the force input is set. Count is the number of prior review comments
+      # carrying REVIEW_MARKER. When capped we post an explanatory comment (so the
+      # reviewer isn't left with a bare "skipped") and set capped=true; later
+      # steps are gated on it and the job still ends green.
       - name: Cost cap check
         id: cap
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-          FORCE: ${{ steps.args.outputs.force }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          FORCE: ${{ inputs.force }}
         run: |
           COUNT=$(gh pr view "$PR_NUMBER" \
             --repo "${{ github.repository }}" \
@@ -156,12 +132,35 @@ jobs:
           if [ "$COUNT" -ge 3 ] && [ "$FORCE" != "true" ]; then
             echo "capped=true" >> "$GITHUB_OUTPUT"
             # Deliberately NO marker in this comment, so it doesn't inflate the count.
-            gh pr comment "$PR_NUMBER" --body \
-          "⏭️ Skipping this Claude review: this PR has already had **$COUNT** reviews, and reviews are capped at 3 to limit cost. Reply with \`@claude force\` to run one anyway."
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
+          "⏭️ Skipping this Claude review: this PR has already had **$COUNT** reviews, and reviews are capped at 3 to limit cost. Re-run the workflow with the **force** input enabled (Actions → Run workflow → tick *force*, or \`gh workflow run … -f force=true\`) to run one anyway."
             echo "Cost cap reached — declining this review." >&2
           else
             echo "capped=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Post review-started comment
+        id: startcomment
+        if: success() && steps.cap.outputs.capped != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          # gh prints the created comment URL ending in #issuecomment-<id>; the
+          # trailing -<id> is the comment id we PATCH later. Validate it parsed to
+          # digits so a future gh output change fails loudly here instead of
+          # silently 404-ing every later PATCH while the job still reports success.
+          URL=$(gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+            --body "🔍 Claude review started (triggered by @${ACTOR})…")
+          ID="${URL##*-}"
+          case "$ID" in
+            ''|*[!0-9]*)
+              echo "Could not parse comment id from gh output: '$URL'" >&2
+              exit 1 ;;
+          esac
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Started comment id: $ID"
 
       - name: Checkout
         if: success() && steps.cap.outputs.capped != 'true'
@@ -187,8 +186,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh auth setup-git
-          gh pr checkout "${{ github.event.issue.number }}"
-          BASE=$(gh pr view "${{ github.event.issue.number }}" --json baseRefName -q .baseRefName)
+          gh pr checkout "${{ inputs.pr_number }}"
+          BASE=$(gh pr view "${{ inputs.pr_number }}" --json baseRefName -q .baseRefName)
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           git fetch origin "$BASE"
 
@@ -225,10 +224,10 @@ jobs:
         if: success() && steps.cap.outputs.capped != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          PR_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
           BASE_REF: ${{ steps.pr.outputs.base }}
-          REVIEW_MODEL: ${{ steps.args.outputs.model }}
-          REVIEW_SCOPE: ${{ steps.args.outputs.scope }}
+          REVIEW_MODEL: ${{ inputs.model }}
+          REVIEW_SCOPE: ${{ inputs.scope }}
         run: |
           set -o pipefail
           PROMPT="${{ inputs.review_command }} ${REVIEW_SCOPE}
@@ -243,13 +242,13 @@ jobs:
             --permission-mode bypassPermissions \
             --output-format text | tee review.md
 
-      - name: Post review comment
+      - name: Update status comment with the review
         if: success() && steps.cap.outputs.capped != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-          REVIEW_MODEL: ${{ steps.args.outputs.model }}
-          REVIEW_SCOPE: ${{ steps.args.outputs.scope }}
+          COMMENT_ID: ${{ steps.startcomment.outputs.id }}
+          REVIEW_MODEL: ${{ inputs.model }}
+          REVIEW_SCOPE: ${{ inputs.scope }}
         run: |
           if [ ! -s review.md ]; then
             echo "Review output was empty" >&2
@@ -271,45 +270,26 @@ jobs:
             printf '</details>\n'
           } >> review.md
 
-          gh pr comment "$PR_NUMBER" --body-file review.md
-
-      - name: Acknowledge success (+1 reaction)
-        if: success() && steps.cap.outputs.capped != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method POST \
+          gh api --method PATCH \
             -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
-            -f content='+1'
-
-      - name: Acknowledge skipped (confused reaction)
-        if: success() && steps.cap.outputs.capped == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
-            -f content='confused'
+            "/repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+            -F body=@review.md
 
       - name: Report failure
         # Skip when the fork guard already posted its own explanatory comment.
         if: failure() && steps.forkguard.outcome != 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          COMMENT_ID: ${{ steps.startcomment.outputs.id }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          gh pr comment "$PR_NUMBER" \
-            --body "⚠️ Claude review failed — see the Actions run log: ${RUN_URL}"
-
-      - name: Acknowledge failure (-1 reaction)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
-            -f content='-1'
+          BODY="⚠️ Claude review failed — see the Actions run log: ${RUN_URL}"
+          if [ -n "$COMMENT_ID" ]; then
+            gh api --method PATCH \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -f body="$BODY"
+          else
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$BODY"
+          fi
