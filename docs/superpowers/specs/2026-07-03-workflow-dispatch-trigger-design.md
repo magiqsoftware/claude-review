@@ -118,29 +118,65 @@ mappings, same shell-injection-safe pattern as today).
 **Reaction steps** — the four `eyes` / `+1` / `confused` / `-1` reaction steps are
 **deleted** (they targeted the trigger comment, which no longer exists).
 
-**"Review started" acknowledgement** — a new first step posts an on-PR comment so
-PR watchers see the review kicked off (replacing the lost `eyes` reaction):
+**Step reorder — cap check before acknowledgement.** The cost-cap check moves
+*before* any "review started" comment, so a review that never starts never posts a
+"started" comment. Fork guard still runs first (refuse forks before touching their
+head), then the cap check, then the started-comment.
 
-```yaml
-- name: Acknowledge trigger (review-started comment)
-  env:
-    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    PR_NUMBER: ${{ inputs.pr_number }}
-  run: |
-    gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
-      --body "🔍 Claude review started (triggered by @${{ github.actor }})…"
-```
+**Single evolving status comment.** Instead of a separate "started" comment plus a
+separate review comment plus a separate failure comment, the workflow posts **one**
+comment and **edits it in place** through the run's lifecycle:
 
-This comment carries **no** `REVIEW_MARKER`, so it does not inflate the cost-cap
-count.
+1. **Cost cap check** (after fork guard). If capped (≥3 completed reviews and
+   `force` is false), post the capped notice and stop — the job ends green via the
+   existing `capped=true` gate on later steps. The capped comment points at the
+   `force` **input**, not an `@claude force` comment (there is no comment trigger):
+
+   > ⏭️ Skipping this Claude review: this PR has already had **N** reviews, and
+   > reviews are capped at 3 to limit cost. Re-run the workflow with the **force**
+   > input enabled (Actions → Run workflow → tick *force*, or `-f force=true`) to
+   > run one anyway.
+
+   This comment carries **no** `REVIEW_MARKER`, so it does not inflate the count.
+
+2. **Not capped → post "review started"** and capture the comment ID:
+
+   ```yaml
+   - name: Post review-started comment
+     id: startcomment
+     if: steps.cap.outputs.capped != 'true'
+     env:
+       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+       PR_NUMBER: ${{ inputs.pr_number }}
+     run: |
+       URL=$(gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+         --body "🔍 Claude review started (triggered by @${{ github.actor }})…")
+       # gh prints the created comment URL; its trailing #issuecomment-<id> is the id.
+       echo "id=${URL##*-}" >> "$GITHUB_OUTPUT"
+   ```
+
+   This "started" comment carries **no** `REVIEW_MARKER` (it is not yet a completed
+   review; the marker is added only when it is edited to the finished review body).
+
+3. **On success → edit the same comment** to the finished review. The "Post review
+   comment" step becomes an **edit** of `steps.startcomment.outputs.id` (via
+   `gh api --method PATCH /repos/{repo}/issues/comments/{id}`), appending the
+   `REVIEW_MARKER` and the collapsed "run locally" footer exactly as today. Editing
+   (not re-posting) is what makes the marker land on the same comment the cap counts.
+
+4. **On failure → edit the same comment** to the failure notice
+   (`⚠️ Claude review failed — see the Actions run log: <url>`) instead of posting a
+   new one, when `steps.startcomment.outputs.id` exists. If the run failed *before*
+   the started-comment was posted (e.g. fork guard), fall back to posting a fresh
+   failure comment as today. The fork-guard skip condition on the failure step stays.
 
 **`concurrency.group`** — `claude-review-${{ inputs.pr_number }}`.
 
-**Unchanged logic** (repointed to `inputs.*` only): fork guard, cost cap check,
-checkout, PR head checkout + base resolution, Node/npm cache, CLI + plugin
-install, run Claude review, post review comment, report failure. The failure
-comment (`⚠️ Claude review failed — see the Actions run log`) is retained; the
-fork-guard skip condition on the failure step stays.
+**Unchanged logic** (repointed to `inputs.*` only): fork guard, cost cap counting,
+checkout, PR head checkout + base resolution, Node/npm cache, CLI + plugin install,
+run Claude review. Cost-cap counting still counts comments carrying `REVIEW_MARKER`
+— unchanged, because the marker is only ever added to a *completed* review body
+(step 3), never to a "started" or "capped" comment.
 
 ### Caller stub (`caller-stub/.github/workflows/claude-review.yml`)
 
@@ -190,6 +226,9 @@ jobs:
 - Repos overriding the review command (e.g. `enterprise-cobol`'s `/cobol-review`)
   keep their `review_command:` line alongside the new `with:` inputs.
 - The header comment is rewritten for the dispatch usage.
+- **This repo's copy** at `caller-stub/.github/workflows/claude-review.yml` is the
+  template consumers copy; it is updated in the same change as the reusable
+  workflow (both live in this repo).
 
 **Trigger UX:**
 - Actions tab → "Claude PR Review" → **Run workflow** → enter PR number, pick
