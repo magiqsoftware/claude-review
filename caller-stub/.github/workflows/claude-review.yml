@@ -27,7 +27,9 @@ on:
       pr_number:
         description: "PR number to review"
         required: true
-        type: number
+        # string, not number: dispatch delivers numbers as strings and the
+        # reusable workflow's pr_number input is typed string to match.
+        type: string
       model:
         description: "Model"
         type: choice
