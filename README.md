@@ -1,8 +1,9 @@
 # magiqsoftware/claude-review
 
 Org-wide **reusable** GitHub Actions workflow for on-demand Claude PR reviews.
-Comment `@claude` on a pull request and a multi-agent code review is posted back
-as a PR comment. The logic lives here once; consuming repos add a ~12-line stub.
+Run the "Claude PR Review" workflow on a pull request (Actions tab or `gh
+workflow run`) and a multi-agent code review is posted back as a PR comment. The
+logic lives here once; consuming repos add a thin `workflow_dispatch` stub.
 
 ## One-time org setup
 
@@ -25,38 +26,57 @@ as a PR comment. The logic lives here once; consuming repos add a ~12-line stub.
 
 Copy `caller-stub/.github/workflows/claude-review.yml` into the target repo's
 `.github/workflows/`. Pin the `uses:` line to a specific release tag — e.g.
-`@v1.0.0` (immutable), **not** `@v1` (moving). Nothing else — credentials and
+`@v2.0.0` (immutable), **not** `@v1` (moving). Nothing else — credentials and
 allowlist inherit from the org.
 
-## Usage (comment on a PR)
+### Migrating from v1 (comment trigger) to v2 (workflow_dispatch)
 
-| Comment | Effect |
-|---------|--------|
-| `@claude` | Default review — Sonnet, scoped to code quality + error handling |
-| `@claude full` | All review agents (comments, tests, errors, types, code, simplify) |
-| `@claude opus` / `sonnet` / `haiku` | Choose the model |
-| `@claude opus full` | Combine (keywords are order-independent) |
-| `@claude force` | Run despite the per-PR review cap |
+v2 is a breaking change: the `@claude` comment trigger is replaced by
+`workflow_dispatch`. To migrate a repo:
+
+1. Replace its `.github/workflows/claude-review.yml` with the current
+   `caller-stub` template (pinned to `@v2.0.0`).
+2. Trigger reviews via the Actions tab or `gh workflow run` instead of commenting
+   `@claude`.
+
+Repos on `@v1.1.0` keep working unchanged until migrated.
+
+## Usage (run the workflow)
+
+Trigger from the Actions tab → **Claude PR Review** → **Run workflow**, or via the
+CLI:
+
+```sh
+gh workflow run "Claude PR Review" -f pr_number=1234 -f model=opus -f scope=full
+```
+
+| Input | Values | Effect |
+|-------|--------|--------|
+| `pr_number` | PR number (required) | Which PR to review |
+| `model` | `sonnet` (default) / `opus` / `haiku` | Choose the model |
+| `scope` | `code errors` (default) / `full` | `full` runs all review agents; default is code quality + error handling |
+| `force` | `false` (default) / `true` | Run despite the per-PR review cap (3) |
 
 ### What `full` changes (and what it doesn't)
 
 `full` only widens **review scope**; it does not change the model, the cost cap,
-the allowlist, or anything else. The keyword maps to a single workflow variable
-(`scope`):
+the allowlist, or anything else. It's the `scope` **workflow input** choice, which
+the caller maps to a single value before passing it to the review command:
 
-- **Default (no `full`)** → `scope = "code errors"`. The review command runs a
-  focused pass: code quality and error handling only. This is the cheapest useful
-  default — fewest agents, lowest token spend.
-- **`full`** → `scope = "all"`. The review command runs every agent in the
-  toolkit: comments, tests, errors, types, code, and simplify. More thorough,
-  but more agents = more tokens = more cost.
+- **Default (`code errors`)** → passed through as `scope = "code errors"`. The
+  review command runs a focused pass: code quality and error handling only. This
+  is the cheapest useful default — fewest agents, lowest token spend.
+- **`full`** → mapped by the caller to `scope = "all"`. The review command runs
+  every agent in the toolkit: comments, tests, errors, types, code, and
+  simplify. More thorough, but more agents = more tokens = more cost.
 
-The keyword is passed through to the review command as a trailing argument
-(`/pr-review-toolkit:review-pr code errors` vs `… all`); the command decides
-which agents that scope dispatches. `full` is therefore independent of `opus` /
-`sonnet` / `haiku` (model) and of `force` (cost-cap bypass) — combine them
-freely. Note that some repo-specific review commands ignore scope entirely and
-always run their full agent set (see *Repo-specific review commands* below).
+The resolved scope is passed through to the review command as a trailing
+argument (`/pr-review-toolkit:review-pr code errors` vs `… all`); the command
+decides which agents that scope dispatches. `scope` is therefore independent of
+`model` (`opus` / `sonnet` / `haiku`) and of `force` (cost-cap bypass) — combine
+them freely. Note that some repo-specific review commands ignore scope entirely
+and always run their full agent set (see *Repo-specific review commands*
+below).
 
 ## Repo-specific review commands (overriding the reviewer)
 
@@ -71,7 +91,7 @@ to its language and risks.
 Wire it up in the caller stub:
 
 ```yaml
-uses: magiqsoftware/claude-review/.github/workflows/claude-review.yml@v1.1.0
+uses: magiqsoftware/claude-review/.github/workflows/claude-review.yml@v2.0.0
 with:
   review_command: "/cobol-review"   # a command defined in this repo's .claude/commands/
 secrets: inherit
@@ -80,8 +100,8 @@ secrets: inherit
 ### Example: `enterprise-cobol`
 
 The `enterprise-cobol` repo ships its own COBOL-tuned reviewer under
-`.claude/` and points `review_command` at it, so `@claude` on a COBOL PR runs the
-COBOL reviewer instead of the generic toolkit:
+`.claude/` and points `review_command` at it, so running the workflow on a
+COBOL PR runs the COBOL reviewer instead of the generic toolkit:
 
 - **`.claude/commands/cobol-review.md`** — the orchestrator command. It reads
   `CLAUDE.md` for repo layout, resolves the changed files
@@ -103,11 +123,11 @@ never walk the whole tree, never read `*.GEN`. That keeps token cost bounded on 
 large mainframe codebase.
 
 How the override differs from the default `full` behavior: `cobol-review`
-**ignores the scope keyword entirely** — it always runs both COBOL agents,
-whether the comment was `@claude` or `@claude full`. The model keyword (`opus` /
-`sonnet` / `haiku`), the cost cap, the allowlist, and the fork guard still apply
-exactly as for the default reviewer; only the *what-gets-reviewed* step is
-swapped out.
+**ignores the `scope` input entirely** — it always runs both COBOL agents,
+whether `scope` was left at its default or set to `full`. The `model` input
+(`opus` / `sonnet` / `haiku`), the cost cap, the allowlist, and the fork guard
+still apply exactly as for the default reviewer; only the *what-gets-reviewed*
+step is swapped out.
 
 ## Limits (and why)
 
@@ -115,7 +135,8 @@ swapped out.
   Override with `force`.
 - **Default Sonnet / code+errors** — cheapest useful default; `opus` and `full`
   are opt-in.
-- **`@claude` only (not `/review`)** — `/review` collides with the Qodo bot.
+- **Manual dispatch only** — reviews run on-demand via `workflow_dispatch`, not
+  automatically on every PR event.
 - **Allowlist + write access** — only trusted users can spend tokens / use secrets.
 - **Fork PRs refused** — the workflow runs with secrets, so it won't run untrusted
   fork code.
