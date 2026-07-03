@@ -1,0 +1,41 @@
+# TEMPORARY E2E test caller — DELETE before merging PR #8.
+# Pinned to the throwaway v2.0.0-rc1 tag to exercise the reusable workflow's
+# workflow_dispatch path end-to-end. Not part of the shipped feature.
+name: Claude PR Review (E2E test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+        type: number
+      model:
+        description: "Model"
+        type: choice
+        options: [sonnet, opus, haiku]
+        default: haiku
+      scope:
+        description: "Review scope"
+        type: choice
+        options: ["code errors", "full"]
+        default: "code errors"
+      force:
+        description: "Bypass the per-PR review cap"
+        type: boolean
+        default: false
+
+permissions:
+  pull-requests: write
+  contents: read
+  issues: write
+
+jobs:
+  review:
+    uses: magiqsoftware/claude-review/.github/workflows/claude-review.yml@v2.0.0-rc1
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      model: ${{ inputs.model }}
+      scope: ${{ inputs.scope == 'full' && 'all' || 'code errors' }}
+      force: ${{ inputs.force }}
+    secrets: inherit
