@@ -21,6 +21,13 @@
 # See the claude-review README for the release/versioning process.
 name: Claude PR Review
 
+# Sets the run's title line (shown in the Actions run list instead of the
+# generic "Claude PR Review #N"). The #<pr_number> reference is rendered as a
+# clickable link to the PR by GitHub. run-name only supports expression
+# contexts (inputs, github, vars) — it can't fetch the live PR title via the
+# API — so we surface the PR number (linked) and the triggering actor here.
+run-name: "Claude review of PR #${{ inputs.pr_number }} reviewed by @${{ github.actor }}"
+
 on:
   workflow_dispatch:
     inputs:

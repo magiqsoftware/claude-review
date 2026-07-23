@@ -57,6 +57,11 @@ gh workflow run "Claude PR Review" -f pr_number=1234 -f model=opus -f scope=full
 | `scope` | `code errors` (default) / `full` | `full` runs all review agents; default is code quality + error handling |
 | `force` | `false` (default) / `true` | Run despite the per-PR review cap (3) |
 
+The run's title in the Actions list reads `Claude review of PR #<n> reviewed by
+@<actor>` (the caller stub's `run-name`), where `#<n>` links to the PR. The live
+PR title can't appear there — `run-name` only evaluates workflow expressions
+(`inputs`, `github`), not an API lookup.
+
 ### What `full` changes (and what it doesn't)
 
 `full` only widens **review scope**; it does not change the model, the cost cap,
